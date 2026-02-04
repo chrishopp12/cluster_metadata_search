@@ -138,6 +138,44 @@ def _digits(s: str) -> str:
     """Return only digits from a string."""
     return "".join(re.findall(r"\d+", str(s)))
 
+def normalize_minus_hyphen(s: str) -> str:
+    """
+    Normalize common Unicode minus/dash characters to ASCII hyphen-minus '-' (which happens if you copy-paste a cluster name, especially from LaTeX).
+
+    This catches cases like:
+      RM J015949.3−084958.9  (U+2212 minus sign)
+    and converts to:
+      RM J015949.3-084958.9
+
+    Parameters
+    ----------
+    s : str
+        Input string.
+
+    Returns
+    -------
+    str
+        String with normalized hyphens.
+    """
+    if s is None:
+        return s
+
+    # Common “looks like a hyphen/minus” code points encountered in copy/paste
+    dash_chars = (
+        "\u2212"  # MINUS SIGN
+        "\u2010"  # HYPHEN
+        "\u2011"  # NON-BREAKING HYPHEN
+        "\u2012"  # FIGURE DASH
+        "\u2013"  # EN DASH
+        "\u2014"  # EM DASH
+        "\u2015"  # HORIZONTAL BAR
+        "\uFE63"  # SMALL HYPHEN-MINUS
+        "\uFF0D"  # FULLWIDTH HYPHEN-MINUS
+    )
+
+    trans = {ord(ch): "-" for ch in dash_chars}
+    return str(s).translate(trans)
+
 def _short4_from_full_name(full_name: str) -> str | None:
     """
     Extract the first 4 digits after 'RMJ' from a canonical RMJ name.
