@@ -846,7 +846,7 @@ def simbad_object_metadata(target_name: str, notes: list[str]) -> dict[str, Any]
     """
     sim = Simbad()
     sim.TIMEOUT = 20
-    sim.add_votable_fields("ra", "dec", "ids", "otype", "rvz_redshift")
+    sim.add_votable_fields("ra", "dec", "ids", "otype", "rvz_redshift", "biblio")
 
     out: dict[str, Any] = {"coord": None, "ids": [], "otype": None, "redshift": None, "publications": []}
 
@@ -896,23 +896,12 @@ def simbad_object_metadata(target_name: str, notes: list[str]) -> dict[str, Any]
         except Exception:
             pass
 
-    # bibliography: best-effort (API varies across astroquery versions)
-    try:
-        # Some versions provide query_bibcode, others query_bibobj; handle both.
-        bib = None
-        if hasattr(sim, "query_bibcode"):
-            bib = sim.query_bibcode(target_name)
-        elif hasattr(sim, "query_bibobj"):
-            bib = sim.query_bibobj(target_name)
-
-        if bib is not None and len(bib) > 0:
-            # Table column could be "BIBCODE" or "bibcode"
-            bcols = {c.lower(): c for c in bib.colnames}
-            bcol = bcols.get("bibcode")
-            if bcol:
-                out["publications"] = [str(v).strip() for v in bib[bcol] if str(v).strip()]
-    except Exception as e:
-        notes.append(f'SIMBAD bibliography lookup failed for "{target_name}": {e}')
+    # bibcodes
+    bib_col = cols.get("biblio")
+    if bib_col:
+        raw_bibs = tab[bib_col][0]
+        if raw_bibs:
+            out["publications"] = [s.strip() for s in str(raw_bibs).split("|") if s.strip()]
 
     return out
 
