@@ -1132,12 +1132,29 @@ def run_general_search(
     else:
         notes.append("No unique target object name; skipping object-centric NED metadata lookup.")
 
-    # Step 4: Deduplicate names + publications
+    # Step 4: Deduplicate names
     alt_names, _ = dedupe_cross_ids(alt_names)
     alt_names = dedupe_preserve_order(alt_names)
+
+
+    # Step 5: Loop through alt names to recover all bibcodes
+    for name in alt_names:
+        # SIMBAD
+        print(f"Searching Simbad: {name}")
+        notes.append(f'Searching SIMBAD for alt name "{name}" for additional publications.')
+        s = simbad_object_metadata(name, notes=notes)
+        if s.get("publications"):
+            publications.extend(list(s["publications"]))
+
+        # NED
+        print(f"Searching NED: {name}")
+        notes.append(f'Searching NED for alt name "{name}" for additional publications.')
+        n = ned_object_metadata(name, notes=notes)
+        if n.get("publications"):
+            publications.extend(list(n["publications"]))
+
+
     publications = dedupe_preserve_order(publications)
-
-
 
 
     # Step 5: Report redshift per source
