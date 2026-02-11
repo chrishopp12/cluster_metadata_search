@@ -374,16 +374,14 @@ def canonicalize_clean_name(raw: str) -> str:
     # Optical cluster finders
     "RM", "WHL",
     "MAXBCG", "GMBCG",
-    "CAMIRA", "CODEX", "NSC", "SPIDERS", "SHELS", "DLSCL",
+    "CAMIRA", "CODEX", "NSC", "SPIDERS", "DLSCL",
 
     # X-ray cluster catalogs
     "MCXC", "RXC", "XMMXCS", "XCLASS",
 
     # SZ catalogs
-    "PLCKESZ", "PSZ1", "PSZ2", "PSZRX",
+    "PLCKESZ", "PSZ1", "PSZ2", "PSZRX", "ACT-C",
 
-    # Optional: BAX (X-ray cluster database)
-    "BAX",
     }
 
 
@@ -561,11 +559,6 @@ def build_clean_alias_header(
     lines.append("#")
     lines.append("# This list contains canonicalized cluster identifiers.")
     lines.append("#")
-    lines.append("# Rules applied:")
-    lines.append("#   - Unapproved bracketed tags removed.")
-    lines.append("#   - ABELL/ACO unified to ABELL #### format.")
-    lines.append("#   - RM variants unified to 'RM J...' format.")
-    lines.append("#   - One-space normalization between prefix and identifier.")
     lines.append("#")
     lines.append("# Catalog Prefix Descriptions:")
     lines.append("#")
@@ -574,7 +567,7 @@ def build_clean_alias_header(
         desc = PREFIX_DESCRIPTIONS.get(p, "No description available.")
         lines.append(f"#   {p:<10} : {desc}")
 
-    lines.append("# ===============================================================")
+    lines.append("# ===============================================================\n")
     lines.append("")
 
     return "\n".join(lines)
