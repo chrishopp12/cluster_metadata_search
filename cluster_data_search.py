@@ -46,6 +46,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+import astropy
 import astropy.units as u
 from astropy.coordinates import SkyCoord, get_icrs_coordinates
 
@@ -736,7 +737,7 @@ def search_by_name(
 
 
 
-def simbad_target_from_name(name: str, notes: list[str]) -> TargetObject | None:
+def simbad_search_by_name(name: str, notes: list[str]) -> TargetObject | None:
     """
     Try SIMBAD object lookup by name. Returns a TargetObject with SIMBAD main_id and coord if successful.
     """
@@ -761,7 +762,7 @@ def simbad_target_from_name(name: str, notes: list[str]) -> TargetObject | None:
         notes.append(f'SIMBAD name lookup failed for "{name}": {e}')
         return None
 
-def ned_target_from_name(name: str, notes: list[str]) -> TargetObject | None:
+def ned_search_by_name(name: str, notes: list[str]) -> TargetObject | None:
     """
     Try NED object lookup by name. Returns a TargetObject with NED Object Name and coord if successful.
     """
@@ -794,7 +795,7 @@ def define_target_by_name(
         ned_allowed_types: list[str] = DEFAULT_NED_CLUSTER_TYPES,
 ) -> tuple[TargetObject | None, TargetObject | None]:
     
-    simbad_target = simbad_target_from_name(mapped_name, notes=notes)
+    simbad_target = simbad_search_by_name(mapped_name, notes=notes)
     if simbad_target is None: # Fall back to coordinate search
         notes.append(f'SIMBAD name lookup failed for "{mapped_name}", trying coordinate search fallback.')
         resolved_target = resolve_target_from_name(mapped_name, notes=notes)
@@ -810,7 +811,7 @@ def define_target_by_name(
         if simbad_target is None:
             notes.append(f'SIMBAD coordinate search fallback failed for "{mapped_name}".')
 
-    ned_target = ned_target_from_name(mapped_name, notes=notes)
+    ned_target = ned_search_by_name(mapped_name, notes=notes)
     if ned_target is None: # Fall back to coordinate search
         notes.append(f'NED name lookup failed for "{mapped_name}", trying coordinate search fallback.')
         resolved_target = resolve_target_from_name(mapped_name, notes=notes)
@@ -832,6 +833,150 @@ def define_target_by_name(
 # -----------------------------
 # Metadata queries
 # -----------------------------
+
+def get_ned_cross_ids(object_name: str, notes: list[str]) -> "astropy.table.Table":
+    """
+    Query NED for a named object and return its identifiers (Cross-IDs). Matches the format of
+    astroquery's Ned.query_object so one day maybe I'll do a PR to astroquery.
+
+    Parameters
+    ----------
+    object_name : str
+        name of the identifier to query.
+    notes : list[str]
+        list to append any error or warning messages.
+
+    Returns
+    -------
+    result : `astropy.table.Table`
+        The result of the query as an `astropy.table.Table` object.
+    """
+    try:
+        Ned.clear_cache()
+        payload = Ned.query_object(object_name, get_query_payload=True)
+        payload["of"] = "xml_names"  # NED: "XML VOTable of Main NED Data"
+
+        response = Ned._request("GET", url=Ned.OBJ_SEARCH_URL, params=payload, timeout=Ned.TIMEOUT)
+        result = Ned._parse_result(response)
+
+    except Exception as e:
+        notes.append(f'NED cross-ID query failed for "{object_name}": {e}')
+        return None
+
+    return result
+
+def _extract_ned_cross_id_strings(tab, notes: list[str]) -> list[str]:
+    """Extract cross-ID strings from NED xml_names result."""
+    if tab is None or len(tab) == 0:
+        notes.append('NED cross-ID extraction: empty or None table')
+        return []
+
+    if "Object Name" not in tab.colnames:
+        notes.append(f'NED cross-ID extraction: "Object Name" column not found. Columns: {tab.colnames}')
+        return []
+
+    out: list[str] = []
+    for v in tab["Object Name"]:
+        s = str(v).strip()
+        if s:
+            out.append(s)
+    return out
+
+def get_simbad_cross_ids(object_name: str, notes: list[str]) -> list[str]:
+    """
+    Query SIMBAD for a named object and return its identifiers (IDs field).
+
+    Parameters
+    ----------
+    object_name : str
+        name of the identifier to query.
+    notes : list[str]
+        list to append any error or warning messages.
+
+    Returns
+    -------
+    list[str]
+        List of cross-ID strings from SIMBAD, or empty list on failure.
+    """
+    sim = Simbad()
+    sim.TIMEOUT = 20
+    sim.add_votable_fields("ids")
+
+    try:
+        tab = sim.query_object(object_name)
+    except Exception as e:
+        notes.append(f'SIMBAD cross-ID query failed for "{object_name}": {e}')
+        return []
+    
+    if tab is None or len(tab) == 0:
+        notes.append(f'SIMBAD cross-ID query: no match for "{object_name}"')
+        return []
+    
+    cols = {c.lower(): c for c in tab.colnames}
+    ids_col = cols.get("ids")
+    if not ids_col:
+        notes.append(f'SIMBAD cross-ID query: "IDs" column not found for "{object_name}"')
+        return []
+    
+    raw_ids = tab[ids_col][0]
+    if not raw_ids:
+        return []
+    
+
+    return [s.strip() for s in str(raw_ids).split("|") if s.strip()]
+
+
+def expand_alt_names_via_metadata(
+    alt_names: list[str],
+    *,
+    notes: list[str],
+    max_total: int = 500,
+) -> list[str]:
+    """
+    Expand alt_names by repeatedly querying SIMBAD+NED metadata for cross-IDs,
+    appending newly discovered names to the iteration list (BFS-like),
+    until no new names are found or max_total is reached.
+
+    Uses existing simbad_object_metadata() and ned_object_metadata().
+    """
+    # Seed: preserve current order but drop obvious empties
+    queue = [n for n in alt_names if n and str(n).strip()]
+    out: list[str] = []
+    seen_keys: set[str] = set()
+
+    i = 0
+    while i < len(queue):
+        if len(queue) >= max_total:
+            notes.append(f"Cross-ID expansion hit max_total={max_total}; stopping early.")
+            break
+
+        name = str(queue[i]).strip()
+        i += 1
+
+        key = normalize_cross_id(name)
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        out.append(name)
+
+        # Query SIMBAD metadata (reuse existing query)
+        s = simbad_object_metadata(name, notes=notes)
+        for xid in (s.get("ids") or []):
+            xid_s = str(xid).strip()
+            xid_key = normalize_cross_id(xid_s)
+            if xid_key and xid_key not in seen_keys:
+                queue.append(xid_s)
+
+        # Query NED metadata (reuse existing query)
+        n = ned_object_metadata(name, notes=notes)
+        for xid in (n.get("names") or []):
+            xid_s = str(xid).strip()
+            xid_key = normalize_cross_id(xid_s)
+            if xid_key and xid_key not in seen_keys:
+                queue.append(xid_s)
+
+    return out
+
 
 def simbad_object_metadata(target_name: str, notes: list[str]) -> dict[str, Any]:
     """
@@ -959,7 +1104,13 @@ def ned_object_metadata(target_name: str, notes: list[str]) -> dict[str, Any]:
 
         name_col = cols.get("object name")
         if name_col:
+            print(f"NED names table: found name column '{name_col}' with value '{tab[name_col][0]}'")
             out["names"].append(str(tab[name_col][0]).strip())
+
+        ned_cross_ids_table = get_ned_cross_ids(target_name, notes=notes)
+        ned_cross_ids = _extract_ned_cross_id_strings(ned_cross_ids_table, notes=notes)
+        if ned_cross_ids:
+            out["names"].extend(ned_cross_ids)
 
 
     # redshifts table fallback (if no z yet)
@@ -1121,7 +1272,13 @@ def run_general_search(
     else:
         notes.append("No unique target object name; skipping object-centric NED metadata lookup.")
 
-    # Step 4: Deduplicate names
+
+    # Step 4: Recover all alt names and deduplicate
+    alt_names = expand_alt_names_via_metadata(
+        alt_names,
+        notes=notes,
+        max_total=500,
+    )
     alt_names, _ = dedupe_cross_ids(alt_names)
     alt_names = dedupe_preserve_order(alt_names)
 
