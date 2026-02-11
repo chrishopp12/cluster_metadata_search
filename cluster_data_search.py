@@ -38,7 +38,10 @@ import sys
 import os
 import time
 import requests
+import unicodedata
 
+
+from datetime import datetime
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -129,17 +132,40 @@ class GeneralSummary:
 
 
 # -----------------------------
-# Utilities
+# Regex helpers
 # -----------------------------
 
-def safe_stem(s: str) -> str:
-    return "".join(ch if (ch.isalnum() or ch in "-_+") else "_" for ch in s).strip("_")
+_WS_RE = re.compile(r"\s+")
+_BRACKET_ANY_RE = re.compile(r"\[([^\]]+)\]")
+_BRACKET_CHUNK_RE = re.compile(r"\[[^\]]+\]")
+_TRAILING_ID_RE = re.compile(r"\s+ID\s*$", re.IGNORECASE)
 
-def _digits(s: str) -> str:
-    """Return only digits from a string."""
-    return "".join(re.findall(r"\d+", str(s)))
 
-def normalize_minus_hyphen(s: str) -> str:
+def _to_str(x: object) -> str:
+    """Convert to string safely (never returns 'None')."""
+    return "" if x is None else str(x)
+
+
+def _clean_unicode(text: str) -> str:
+    """
+    Normalize unicode representation and strip odd control chars.
+    Keeps content but makes comparisons reliable.
+    """
+    # NFKC helps with weird compatibility forms; safe for names.
+    s = unicodedata.normalize("NFKC", _to_str(text))
+    # Drop non-printing control characters
+    s = "".join(ch for ch in s if ch.isprintable())
+    return s
+
+def _collapse_whitespace(text: str) -> str:
+    """Collapse any whitespace runs into single spaces and strip ends."""
+    return _WS_RE.sub(" ", _to_str(text)).strip()
+
+def _to_upper(text: str) -> str:
+    """Uppercase using basic .upper(); good enough for astro IDs."""
+    return _to_str(text).upper()
+
+def _normalize_minus_hyphen(s: str) -> str:
     """
     Normalize common Unicode minus/dash characters to ASCII hyphen-minus '-' (which happens if you copy-paste a cluster name, especially from LaTeX).
 
@@ -172,10 +198,40 @@ def normalize_minus_hyphen(s: str) -> str:
         "\u2015"  # HORIZONTAL BAR
         "\uFE63"  # SMALL HYPHEN-MINUS
         "\uFF0D"  # FULLWIDTH HYPHEN-MINUS
+        "\u2043"  # HYPHEN BULLET
+        "\u00ad"  # SOFT HYPHEN
     )
 
     trans = {ord(ch): "-" for ch in dash_chars}
     return str(s).translate(trans)
+
+
+def _strip_trailing_id_token(text: str) -> str:
+    """
+    Remove a dumb trailing 'ID' token (seen in 'RXC ... ID').
+    Conservative: only strips if it appears at the very end.
+    """
+    return _TRAILING_ID_RE.sub("", _to_str(text)).strip()
+
+def basic_clean(text: str) -> str:
+    """Common baseline clean used everywhere."""
+    s = _clean_unicode(text)
+    s = _normalize_minus_hyphen(s)
+    s = _collapse_whitespace(s)
+    return s
+
+# -----------------------------
+# Utilities
+# -----------------------------
+
+def safe_stem(s: str) -> str:
+    return "".join(ch if (ch.isalnum() or ch in "-_+") else "_" for ch in s).strip("_")
+
+def _digits(s: str) -> str:
+    """Return only digits from a string."""
+    return "".join(re.findall(r"\d+", str(s)))
+
+
 
 def _short4_from_full_name(full_name: str) -> str | None:
     """
@@ -217,69 +273,312 @@ def dedupe_preserve_order(items: list[str]) -> list[str]:
     return out
 
 
+def dedupe_prefer_leading_j(names: list[str]) -> list[str]:
+    """
+    Deduplicate aliases that differ only by a leading 'J' in the rest token.
+    Preference: keep the version with the leading 'J'.
 
-def normalize_cross_id(raw: str) -> str:
+    Assumes each name is already in 'PREFIX rest' or 'PREFIX' form.
+    Preserves first-seen order of the equivalence class.
+    """
+    best_for_key: dict[str, str] = {}
+    first_index: dict[str, int] = {}
+
+    def base_key(name: str) -> str:
+        parts = name.split(" ", 1)
+        prefix = parts[0]
+        rest = parts[1] if len(parts) == 2 else ""
+        rest_stripped = rest
+        # Only treat as a J-variant if it looks like a J-name (J followed by a digit)
+        if rest_stripped.startswith("J") and len(rest_stripped) >= 2 and rest_stripped[1].isdigit():
+            rest_stripped = rest_stripped[1:]
+        return prefix + " " + rest_stripped if rest_stripped else prefix
+
+    def is_j_variant(name: str) -> bool:
+        parts = name.split(" ", 1)
+        if len(parts) != 2:
+            return False
+        rest = parts[1]
+        return rest.startswith("J") and len(rest) >= 2 and rest[1].isdigit()
+
+    for i, n in enumerate(names):
+        k = base_key(n)
+        if k not in first_index:
+            first_index[k] = i
+            best_for_key[k] = n
+            continue
+
+        # Prefer J-variant over non-J-variant
+        if is_j_variant(n) and not is_j_variant(best_for_key[k]):
+            best_for_key[k] = n
+
+    # Emit in first-seen order of the equivalence class
+    ordered_keys = sorted(first_index.keys(), key=lambda k: first_index[k])
+    return [best_for_key[k] for k in ordered_keys]
+
+
+
+def normalize_key(name: str) -> str:
+    """
+    Normalize a name into a *conservative* key suitable for 'seen_keys' in expansion loops.
+
+    Design goals:
+    - Prevent collisions from contextless tokens (e.g., '199', 'A', 'J0920...')
+    - Avoid over-normalizing into unqueryable strings
+    - Still dedupe trivial formatting differences (unicode hyphens, whitespace, case)
+    """
+    s = basic_clean(name)
+    if not s:
+        return ""
+
+    # Uppercase for stable comparisons
+    s = _to_upper(s)
+
+    # One safe special-case: '... ID' suffix (RXC name variants)
+    s = _strip_trailing_id_token(s)
+
+    return s
+
+
+def normalize_keys(names: list[str]) -> list[str]:
+    """Vectorized helper: return normalized keys for a list of names."""
+    return [normalize_key(n) for n in names]
+
+
+
+
+def canonicalize_clean_name(raw: str) -> str:
     """
     Convert a cross-ID to a canonical-ish form for deduping.
     Keep this conservative and extend over time.
 
     Returns a *key* used for deduping (not necessarily pretty for display).
     """
-    if raw is None:
-        return ""
 
-    s = str(raw).strip()
+    # --- Catalog-specific regexes ---
+    _ABELL_ACO_RE = re.compile(r"^(ABELL|ACO)\s+0*(\d+)\s*([A-Z])?\s*$", re.IGNORECASE)
+
+
+    # Allowed bracket tags and how (if at all) they map to a prefix
+    _ALLOWED_BRACKET_TAGS = {"RRB2014", "WHL2009", "WHL2012"}
+    _BRACKET_TAG_TO_PREFIX = {
+        "RRB2014": "RM",
+        "WHL2009": "WHL",
+        "WHL2012": "WHL",
+    }
+
+    _APPROVED_PREFIXES = {
+    # Primary/legacy cluster catalogs
+    "ABELL", "ACO", "ZWCL", "MACS",
+
+    # Optical cluster finders
+    "RM", "WHL",
+    "MAXBCG", "GMBCG",
+    "CAMIRA", "CODEX", "NSC", "SPIDERS", "SHELS", "DLSCL",
+
+    # X-ray cluster catalogs
+    "MCXC", "RXC", "XMMXCS", "XCLASS",
+
+    # SZ catalogs
+    "PLCKESZ", "PSZ1", "PSZ2", "PSZRX",
+
+    # Optional: BAX (X-ray cluster database)
+    "BAX",
+    }
+
+
+    def _strip_or_reject_brackets(s: str) -> tuple[str, str | None] | None:
+        """
+        Returns combined string with bracket tags stripped, and a promoted prefix if any allowed tag is present.
+        or None if any bracket tag is not allowed.
+        """
+        tags = [t.strip().upper() for t in _BRACKET_ANY_RE.findall(s)]
+        if tags:
+            for t in tags:
+                if t not in _ALLOWED_BRACKET_TAGS:
+                    return None
+
+        promoted: str | None = None
+        for t in tags:
+            p = _BRACKET_TAG_TO_PREFIX.get(t)
+            if p:
+                promoted = p
+                break
+
+        s2 = _BRACKET_CHUNK_RE.sub("", s)
+        s2 = _collapse_whitespace(s2)
+
+        if promoted and not s2.upper().startswith(promoted + " "):
+            s2 = f"{promoted} {s2}" if s2 else promoted
+
+        return s2
+    
+
+    def _canonicalize_abell_aco(s: str) -> str | None:
+        """
+        ABELL/ACO -> ABELL ####[LETTER]
+        """
+        m = _ABELL_ACO_RE.match(s)
+        if not m:
+            return None
+        num = int(m.group(2))
+        suff = (m.group(3) or "").upper()
+        return f"ABELL {num:04d}{suff}"
+
+    s = basic_clean(raw)
     if not s:
         return ""
 
-    # Collapse internal whitespace
-    s = re.sub(r"\s+", " ", s)
+    # Bracket handling anywhere in the string
+    s = _strip_or_reject_brackets(s)
+    if not s:
+        return None
 
-    # Extract bracket tag if present: [RRB2014] ...
-    m = re.match(r"^\[([A-Za-z0-9]+)\]\s*(.*)$", s)
-    if m:
-        tag = m.group(1)
-        rest = m.group(2).strip()
-
-
-        if tag == "RRB2014":
-            # Examples:
-            # [RRB2014] RM J121917.6+505432.8 = RMJ121917.6+505432.8
-            rest = re.sub(r"^RM\s+J", "RMJ", rest)
-            rest = re.sub(r"^RMJ\s+", "RMJ", rest)
-            s = rest
-
-        elif tag == "WHL2009":
-            # [WHL2009] J121917.6+505432 = WHL J121917.6+505432
-            if re.match(r"^J\d", rest):
-                s = "WHL " + rest
-            else:
-                s = "WHL " + rest if not rest.upper().startswith("WHL") else rest
-
-        else:
-            # Default: drop the [TAG] and keep remainder
-            s = rest
-
-    # Standardize spacing around catalog tokens
-    s = re.sub(r"\s+", " ", s).strip()
-
-    # Normalize RM J... forms if they show up without [RRB2014]
-    s = re.sub(r"^RM\s+J", "RMJ", s, flags=re.IGNORECASE)
-
-    # Normalize "WHL J..." (ensure single space)
-    s = re.sub(r"^WHL\s+J", "WHL J", s, flags=re.IGNORECASE)
-
-    # Normalize PSZ variants: PSZ1/PSZ2/PSZRX keep as-is but unify spaces
-    s = re.sub(r"\s+", " ", s).strip()
-
-    # Uppercase catalog token (first word), keep the rest as-is
+    # Standardize spacing and split into prefix + rest
+    s = _collapse_whitespace(s)
     parts = s.split(" ", 1)
-    if len(parts) == 2:
-        s = parts[0].upper() + " " + parts[1]
-    else:
-        s = parts[0].upper()
+    prefix = parts[0].upper()
+    rest = parts[1].strip() if len(parts) == 2 else ""
 
-    return s
+    # Minimal explicit canonicalization you requested:
+    if prefix in {"ABELL", "ACO"}:
+        out = _canonicalize_abell_aco(s)
+        return out
+
+    # Check approved prefixes
+    if prefix not in _APPROVED_PREFIXES:
+        return None
+
+    # Generic rule: enforce "PREFIX <space>REST" with uppercase prefix
+    if rest:
+        return f"{prefix} {rest}"
+    return prefix
+
+
+def normalize_cross_id(full_aliases: list[str]) -> list[str]:
+    """
+    Build a clean alias list, deduped by exact match, preserving first-seen order.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in full_aliases:
+        c = canonicalize_clean_name(raw)
+        if c is None:
+            continue
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    out = dedupe_prefer_leading_j(out)
+    out.sort()
+    return out
+
+
+def build_clean_alias_header(
+    clean_aliases: list[str],
+    *,
+    include_prefixes: set[str] | None = None,
+) -> str:
+    """
+    Build a descriptive header for a cleaned alias list.
+
+    Parameters
+    ----------
+    clean_aliases : list[str]
+        Canonical cleaned aliases.
+    include_prefixes : set[str] | None
+        If provided, restrict descriptions to these prefixes only.
+        Otherwise infer from clean_aliases.
+
+    Returns
+    -------
+    str
+        Multi-line header suitable for writing at top of file.
+    """
+
+    PREFIX_DESCRIPTIONS: dict[str, str] = {
+        # Classic optical catalogs
+        "ABELL": "Abell galaxy cluster catalog (Abell 1958; Abell, Corwin & Olowin 1989).",
+        "ZWCL": "Zwicky cluster catalog (optical clusters).",
+        "MACS": "MAssive Cluster Survey (high-mass, mostly X-ray selected clusters).",
+
+        # Optical richness-based cluster catalogs
+        "RM": "redMaPPer cluster catalog (SDSS-based red-sequence cluster finder).",
+        "WHL": "Wen-Han-Liu SDSS cluster catalog.",
+        "MAXBCG": "MaxBCG SDSS cluster catalog (BCG-based selection).",
+        "GMBCG": "Gaussian Mixture Brightest Cluster Galaxy catalog (SDSS).",
+        "CAMIRA": "CAMIRA optical cluster finder (Subaru/HSC).",
+        "CODEX": "CODEX X-ray-optical cluster catalog.",
+        "NSC": "NOAO Source Catalog cluster identifications.",
+        "SPIDERS": "SPIDERS (SDSS-IV) spectroscopic cluster identifications.",
+        "SHELS": "Smithsonian Hectospec Lensing Survey cluster catalog.",
+        "DLSCL": "Deep Lens Survey cluster catalog.",
+
+        # X-ray cluster catalogs
+        "MCXC": "Meta-Catalogue of X-ray detected Clusters (combined X-ray catalogs).",
+        "RXC": "REFLEX ROSAT X-ray cluster catalog.",
+        "XMMXCS": "XMM Cluster Survey (X-ray selected clusters).",
+        "XCLASS": "X-ray cluster catalog (XMM-based).",
+        "BAX": "BAX (Base de Données Amas de Galaxies X) X-ray cluster database.",
+
+        # SZ cluster catalogs
+        "PLCKESZ": "Planck Early Sunyaev-Zel'dovich (SZ) cluster catalog.",
+        "PSZ1": "Planck SZ cluster catalog, first release.",
+        "PSZ2": "Planck SZ cluster catalog, second release.",
+        "PSZRX": "Planck SZ-X-ray matched cluster catalog.",
+        "ACT-C": "Atacama Cosmology Telescope cluster catalog (SZ-selected).",
+
+        # Optional extended entries
+        "2MASSCL": "2MASS Galaxy Cluster catalog.",
+        "GC2M": "2MASS-based galaxy cluster catalog.",
+        "EXSS": "Extended X-ray Source Survey (may include clusters).",
+
+        # Object-level cross-ID catalogs (not cluster catalogs per se, but commonly cross-ID'd)
+        "2MASS": "Two Micron All Sky Survey source catalog (object-level).",
+        "WISEA": "WISE All-Sky source catalog (object-level).",
+        "1RXS": "ROSAT All-Sky Survey source catalog (object-level).",
+        "2E": "Einstein Observatory source catalog (object-level).",
+        "SDSS": "Sloan Digital Sky Survey object designation.",
+        "PLANCK": "Generic Planck designation.",
+    }
+
+
+
+    # Infer prefixes from the cleaned list
+    prefixes_in_use = set()
+    for name in clean_aliases:
+        parts = name.split(" ", 1)
+        prefixes_in_use.add(parts[0].upper())
+
+    if include_prefixes is not None:
+        prefixes = sorted(include_prefixes)
+    else:
+        prefixes = sorted(prefixes_in_use)
+
+    lines = []
+    lines.append("# ===============================================================")
+    lines.append("# Cleaned Galaxy Cluster Alias List")
+    lines.append(f"# Generated: {datetime.utcnow().isoformat()} UTC")
+    lines.append("#")
+    lines.append("# This list contains canonicalized cluster identifiers.")
+    lines.append("#")
+    lines.append("# Rules applied:")
+    lines.append("#   - Unapproved bracketed tags removed.")
+    lines.append("#   - ABELL/ACO unified to ABELL #### format.")
+    lines.append("#   - RM variants unified to 'RM J...' format.")
+    lines.append("#   - One-space normalization between prefix and identifier.")
+    lines.append("#")
+    lines.append("# Catalog Prefix Descriptions:")
+    lines.append("#")
+
+    for p in prefixes:
+        desc = PREFIX_DESCRIPTIONS.get(p, "No description available.")
+        lines.append(f"#   {p:<10} : {desc}")
+
+    lines.append("# ===============================================================")
+    lines.append("")
+
+    return "\n".join(lines)
+
 
 
 def choose_preferred_label(candidates: list[str]) -> str:
@@ -926,12 +1225,12 @@ def get_simbad_cross_ids(object_name: str, notes: list[str]) -> list[str]:
     return [s.strip() for s in str(raw_ids).split("|") if s.strip()]
 
 
-def expand_alt_names_via_metadata(
+def name_and_publication_search(
     alt_names: list[str],
     *,
     notes: list[str],
     max_total: int = 500,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """
     Expand alt_names by repeatedly querying SIMBAD+NED metadata for cross-IDs,
     appending newly discovered names to the iteration list (BFS-like),
@@ -942,6 +1241,7 @@ def expand_alt_names_via_metadata(
     # Seed: preserve current order but drop obvious empties
     queue = [n for n in alt_names if n and str(n).strip()]
     out: list[str] = []
+    publications: list[str] = []
     seen_keys: set[str] = set()
 
     i = 0
@@ -953,7 +1253,7 @@ def expand_alt_names_via_metadata(
         name = str(queue[i]).strip()
         i += 1
 
-        key = normalize_cross_id(name)
+        key = normalize_key(name)
         if not key or key in seen_keys:
             continue
         seen_keys.add(key)
@@ -963,19 +1263,24 @@ def expand_alt_names_via_metadata(
         s = simbad_object_metadata(name, notes=notes)
         for xid in (s.get("ids") or []):
             xid_s = str(xid).strip()
-            xid_key = normalize_cross_id(xid_s)
+            xid_key = normalize_key(xid_s)
             if xid_key and xid_key not in seen_keys:
                 queue.append(xid_s)
+        if s.get("publications"):
+            publications.extend(list(s["publications"]))
+
 
         # Query NED metadata (reuse existing query)
         n = ned_object_metadata(name, notes=notes)
         for xid in (n.get("names") or []):
             xid_s = str(xid).strip()
-            xid_key = normalize_cross_id(xid_s)
+            xid_key = normalize_key(xid_s)
             if xid_key and xid_key not in seen_keys:
                 queue.append(xid_s)
+        if n.get("publications"):
+            publications.extend(list(n["publications"]))
 
-    return out
+    return out, publications
 
 
 def simbad_object_metadata(target_name: str, notes: list[str]) -> dict[str, Any]:
@@ -1104,7 +1409,6 @@ def ned_object_metadata(target_name: str, notes: list[str]) -> dict[str, Any]:
 
         name_col = cols.get("object name")
         if name_col:
-            print(f"NED names table: found name column '{name_col}' with value '{tab[name_col][0]}'")
             out["names"].append(str(tab[name_col][0]).strip())
 
         ned_cross_ids_table = get_ned_cross_ids(target_name, notes=notes)
@@ -1273,35 +1577,18 @@ def run_general_search(
         notes.append("No unique target object name; skipping object-centric NED metadata lookup.")
 
 
-    # Step 4: Recover all alt names and deduplicate
-    alt_names = expand_alt_names_via_metadata(
+    # Step 4: Recover all alt names and comprehensive list of publications and deduplicate
+    alt_names, pubs = name_and_publication_search(
         alt_names,
         notes=notes,
         max_total=500,
     )
-    alt_names, _ = dedupe_cross_ids(alt_names)
+
     alt_names = dedupe_preserve_order(alt_names)
-
-
-    # Step 5: Loop through alt names to recover all bibcodes
-    for name in alt_names:
-        # SIMBAD
-        print(f"Searching Simbad: {name}")
-        notes.append(f'Searching SIMBAD for alt name "{name}" for additional publications.')
-        s = simbad_object_metadata(name, notes=notes)
-        if s.get("publications"):
-            publications.extend(list(s["publications"]))
-
-        # NED
-        print(f"Searching NED: {name}")
-        notes.append(f'Searching NED for alt name "{name}" for additional publications.')
-        n = ned_object_metadata(name, notes=notes)
-        if n.get("publications"):
-            publications.extend(list(n["publications"]))
-
-
+    alt_names.sort()
+    publications.extend(pubs)
     publications = dedupe_preserve_order(publications)
-
+    
 
     # Step 5: Report redshift per source
     redshifts_by_source = redshift_by_source(z_cands)
@@ -1339,6 +1626,9 @@ def run_general_search(
 
     ra_deg = float(target.coord.ra.deg) if target.coord is not None else None
     dec_deg = float(target.coord.dec.deg) if target.coord is not None else None
+
+
+    
 
     return GeneralSummary(
         input_radec_deg=(float(input_coord.ra.deg), float(input_coord.dec.deg)) if input_coord is not None else None,
@@ -1424,6 +1714,7 @@ def main(argv: list[str]) -> int:
     # Write outputs
 
     bibcodes = dedupe_preserve_order(summary.publications)
+    alt_names_cleaned = normalize_cross_id(summary.alt_names)
 
     write_json(
         outdir / f"{tag}_publications_bibcodes.json",
@@ -1450,6 +1741,17 @@ def main(argv: list[str]) -> int:
 
     alt_path = outdir / f"{tag}_alt_names.txt"
     alt_path.write_text("\n".join(summary.alt_names) + ("\n" if summary.alt_names else ""))
+    logging.info(f"Wrote: {alt_path}")
+
+
+    header = build_clean_alias_header(alt_names_cleaned)
+    alt_path = outdir / f"{tag}_alt_names_cleaned.txt"
+    with open(alt_path, "w") as f:
+        f.write(header)
+        for name in alt_names_cleaned:
+            f.write(name + "\n")
+    
+    # alt_path.write_text("\n".join(alt_names_cleaned) + ("\n" if alt_names_cleaned else ""))
     logging.info(f"Wrote: {alt_path}")
 
     pubs_path = outdir / f"{tag}_publications.txt"
