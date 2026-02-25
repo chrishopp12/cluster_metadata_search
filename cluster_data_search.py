@@ -39,6 +39,7 @@ import os
 import time
 import requests
 import unicodedata
+import textwrap
 
 
 from datetime import datetime
@@ -612,6 +613,83 @@ def build_clean_alias_header(
     return "\n".join(lines)
 
 
+def _norm_for_pub_search(text: str) -> str:
+    """Normalize text for substring matching against ADS title/abstract."""
+    s = basic_clean(text)
+    s = s.replace("−", "-").replace("–", "-").replace("—", "-")
+    s = _strip_trailing_id_token(s)
+    return s.casefold()
+
+
+def build_pub_search_tokens(clean_aliases: list[str], mapped_name: str | None = None) -> list[str]:
+    """
+    Build a small token list used to search ADS title/abstract for explicit mention.
+
+    Inputs are expected to be already cleaned/canonicalized (i.e., output of normalize_cross_id()).
+    """
+    tokens: set[str] = set()
+
+    # Include mapped name too (it may be the "nice" name you started with)
+    if mapped_name:
+        mn = _norm_for_pub_search(mapped_name)
+        if mn:
+            tokens.add(mn)
+
+    for name in clean_aliases:
+        if not name:
+            continue
+        n = _norm_for_pub_search(name)
+        if not n:
+            continue
+
+        # Full alias token
+        tokens.add(n)
+
+        # ABELL -> add short "A####" token
+        m_ab = _ABELL_CANON_RE.match(name.strip())
+        if m_ab:
+            num = m_ab.group(1)  # already stripped leading zeros by regex group
+            suff = m_ab.group(2) or ""
+            tokens.add(_norm_for_pub_search(f"A{num}{suff}"))
+            tokens.add(_norm_for_pub_search(f"A{num}"))
+            tokens.add(_norm_for_pub_search(f"ABELL {int(num)}{suff}"))
+            tokens.add(_norm_for_pub_search(f"ABELL {int(num)}"))
+
+        # Coordinate core tokens (for J-style names)
+        for m in _COORD_CORE_RE.finditer(n):
+            ra = m.group("ra")
+            dec = m.group("dec")
+            sign = "-" if m.group("sign") in ["-", "−", "–", "—"] else "+"
+            core = f"{ra}{sign}{dec}"
+
+            # Core as written, and a space-separated variant (shows up in prose sometimes)
+            tokens.add(_norm_for_pub_search(core))
+            tokens.add(_norm_for_pub_search(f"{ra} {dec}"))
+
+            # Optional no-decimal variants (catalog prose sometimes drops decimals)
+            ra0 = ra.split(".")[0]
+            dec0 = dec.split(".")[0]
+            tokens.add(_norm_for_pub_search(f"{ra0}{sign}{dec0}"))
+            tokens.add(_norm_for_pub_search(f"{ra0} {dec0}"))
+
+    # Light prune: drop super-short alphabetic-only tokens
+    out = [t for t in tokens if any(ch.isdigit() for ch in t) or len(t) >= 8]
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def publication_mentions_any_token(pub: dict, tokens: list[str]) -> bool:
+    """
+    Return True if any token appears in title+abstract of an ADS-resolved pub dict.
+    Assumes pub has keys 'title' and optionally 'abstract' (we will request it).
+    """
+    title = pub.get("title") or ""
+    abstract = pub.get("abstract") or ""
+    blob = _norm_for_pub_search(f"{title} {abstract}")
+    if not blob:
+        return False
+    return any(tok in blob for tok in tokens)
+
 
 def choose_preferred_label(candidates: list[str]) -> str:
     """
@@ -734,6 +812,18 @@ def resolve_bibcodes_ads(
         time.sleep(sleep_s)
 
     return out
+
+
+def wrap_abstract_lines(text: str | None, *, width: int = 88) -> list[str]:
+    """
+    Wrap an abstract for human-readable JSON output.
+    Returns list-of-lines so the JSON pretty print is actually multi-line.
+    """
+    if not text:
+        return []
+    cleaned = _collapse_whitespace(text)
+    wrapped = textwrap.fill(cleaned, width=width)
+    return wrapped.splitlines()
 
 
 def load_id_map_csv(map_path: Path) -> tuple[dict[str, str], dict[str, str]]:
@@ -1275,47 +1365,77 @@ def name_and_publication_search(
 
     Uses existing simbad_object_metadata() and ned_object_metadata().
     """
+
+    NED_EXCLUDED_PREFIXES = {"[RRB2014]", "[WHL2012]", "[B2017]", "4U", "3U", "2E", "INTEREF", "XCLASS"}
+    SIMBAD_EXCLUDED_PREFIXES = {"WHL", "RM", "RM J", "4U", "3U", "[GRW2022]", "[WH2015]"}
+
+    # Normalize exclusion keys
+    ned_excl = {normalize_key(p) for p in NED_EXCLUDED_PREFIXES}
+    simbad_excl = {normalize_key(p) for p in SIMBAD_EXCLUDED_PREFIXES}
+
+    def _skip_backend(name: str, backend: str) -> bool:
+        key = normalize_key(name)
+        if not key:
+            return True
+        if backend == "ned":
+            return any(key.startswith(p) for p in ned_excl)
+        elif backend == "simbad":
+            return any(key.startswith(p) for p in simbad_excl)
+        return False
+
     # Seed: preserve current order but drop obvious empties
-    queue = [n for n in alt_names if n and str(n).strip()]
+    queue: list[str] = []
+    seen_keys: set[str] = set()
+    for name in alt_names:
+        name_str = str(name).strip()
+        name_key = normalize_key(name_str)
+        if name_key and name_key not in seen_keys:
+            seen_keys.add(name_key)
+            queue.append(name_str)
+
     out: list[str] = []
     publications: list[str] = []
-    seen_keys: set[str] = set()
 
     i = 0
     while i < len(queue):
-        if len(queue) >= max_total:
+        if len(seen_keys) >= max_total:
             notes.append(f"Cross-ID expansion hit max_total={max_total}; stopping early.")
+            notes.append(f"[debug] max_total trip: key_len={len(seen_keys)} queue_len={len(queue)} out_len={len(out)} i={i}")
             break
 
         name = str(queue[i]).strip()
         i += 1
 
-        key = normalize_key(name)
-        if not key or key in seen_keys:
-            continue
-        seen_keys.add(key)
         out.append(name)
 
         # Query SIMBAD metadata (reuse existing query)
-        s = simbad_object_metadata(name, notes=notes)
-        for xid in (s.get("ids") or []):
-            xid_s = str(xid).strip()
-            xid_key = normalize_key(xid_s)
-            if xid_key and xid_key not in seen_keys:
-                queue.append(xid_s)
-        if s.get("publications"):
-            publications.extend(list(s["publications"]))
+        if not _skip_backend(name, "simbad"):
+            s = simbad_object_metadata(name, notes=notes)
+            for xid in (s.get("ids") or []):
+                xid_s = str(xid).strip()
+                xid_key = normalize_key(xid_s)
+                if xid_key and xid_key not in seen_keys:
+                    seen_keys.add(xid_key)
+                    queue.append(xid_s)
+            if s.get("publications"):
+                publications.extend(list(s["publications"]))
+        else:
+            notes.append(f'Skipping SIMBAD metadata query for "{name}" due to excluded prefix.')
 
 
         # Query NED metadata (reuse existing query)
-        n = ned_object_metadata(name, notes=notes)
-        for xid in (n.get("names") or []):
-            xid_s = str(xid).strip()
-            xid_key = normalize_key(xid_s)
-            if xid_key and xid_key not in seen_keys:
-                queue.append(xid_s)
-        if n.get("publications"):
-            publications.extend(list(n["publications"]))
+        if not _skip_backend(name, "ned"):
+            n = ned_object_metadata(name, notes=notes)
+            for xid in (n.get("names") or []):
+                xid_s = str(xid).strip()
+                xid_key = normalize_key(xid_s)
+                if xid_key and xid_key not in seen_keys:
+                    seen_keys.add(xid_key)
+                    queue.append(xid_s)
+            if n.get("publications"):
+                publications.extend(list(n["publications"]))
+        else:
+            notes.append(f'Skipping NED metadata query for "{name}" due to excluded prefix.')
 
     return out, publications
 
@@ -1753,6 +1873,8 @@ def main(argv: list[str]) -> int:
     bibcodes = dedupe_preserve_order(summary.publications)
     alt_names_cleaned = normalize_cross_id(summary.alt_names)
 
+    pub_tokens = build_pub_search_tokens(alt_names_cleaned, mapped_name=mapped_name)
+
     write_json(
         outdir / f"{tag}_publications_bibcodes.json",
         [{"bibcode": b} for b in bibcodes],
@@ -1762,10 +1884,27 @@ def main(argv: list[str]) -> int:
     if os.environ.get("ADS_API_TOKEN"):
         try:
             pubs_resolved = resolve_bibcodes_ads(bibcodes)
+            pubs_resolved_noabs = [{k: v for k, v in p.items() if k != "abstract"} for p in pubs_resolved]
             write_json(
                 outdir / f"{tag}_publications_resolved.json",
-                pubs_resolved,
+                pubs_resolved_noabs,
             )
+            pubs_filtered = [p for p in pubs_resolved if publication_mentions_any_token(p, pub_tokens)]
+
+            pubs_filtered_pretty: list[dict] = []
+            for p in pubs_filtered:
+                q = dict(p)
+                q["abstract_lines"] = wrap_abstract_lines(q.get("abstract"), width=88)
+                # Optional: drop the single-line abstract entirely to avoid duplication
+                q.pop("abstract", None)
+                pubs_filtered_pretty.append(q)
+
+            write_json(
+                outdir / f"{tag}_publications_filtered.json",
+                pubs_filtered_pretty,
+            )
+
+
         except Exception as e:
             summary.notes.append(f"ADS publication resolution failed: {e}")
     else:
