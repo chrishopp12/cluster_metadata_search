@@ -124,10 +124,10 @@ class GeneralSummary:
     # Data products
     alt_names: list[str]
     cross_ids: dict[str, list[str]]
-    redshifts_by_source: dict[str, float]  # e.g. {"simbad": 0.3214, "ned": 0.322}
+    redshifts_by_source: dict[str, float] 
     redshift_candidates: list[RedshiftCandidate]
 
-    publications: list[str]               # bibcodes or NED ref IDs 
+    publications: list[str]          
     notes: list[str]
 
 
@@ -139,6 +139,12 @@ _WS_RE = re.compile(r"\s+")
 _BRACKET_ANY_RE = re.compile(r"\[([^\]]+)\]")
 _BRACKET_CHUNK_RE = re.compile(r"\[[^\]]+\]")
 _TRAILING_ID_RE = re.compile(r"\s+ID\s*$", re.IGNORECASE)
+_COORD_CORE_RE = re.compile(
+    r"(?:\bJ\s*)?(?P<ra>\d{6}(?:\.\d+)?)\s*(?P<sign>[+\-−–—])\s*(?P<dec>\d{6}(?:\.\d+)?)\b",
+    re.IGNORECASE,
+)
+
+_ABELL_CANON_RE = re.compile(r"^ABELL\s+0*(\d{1,4})([A-Z])?\s*$", re.IGNORECASE)
 
 
 def _to_str(x: object) -> str:
@@ -1066,7 +1072,6 @@ def search_by_name(
     )
 
 
-
 def simbad_search_by_name(name: str, notes: list[str]) -> TargetObject | None:
     """
     Try SIMBAD object lookup by name. Returns a TargetObject with SIMBAD main_id and coord if successful.
@@ -1091,6 +1096,7 @@ def simbad_search_by_name(name: str, notes: list[str]) -> TargetObject | None:
     except Exception as e:
         notes.append(f'SIMBAD name lookup failed for "{name}": {e}')
         return None
+
 
 def ned_search_by_name(name: str, notes: list[str]) -> TargetObject | None:
     """
