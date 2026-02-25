@@ -345,8 +345,6 @@ def normalize_keys(names: list[str]) -> list[str]:
     return [normalize_key(n) for n in names]
 
 
-
-
 def canonicalize_clean_name(raw: str) -> str:
     """
     Convert a cross-ID to a canonical-ish form for deduping.
@@ -369,18 +367,21 @@ def canonicalize_clean_name(raw: str) -> str:
 
     _APPROVED_PREFIXES = {
     # Primary/legacy cluster catalogs
-    "ABELL", "ACO", "ZWCL", "MACS",
+    "ABELL", "ACO", "ZWCL", "MACS", "MCS",
 
     # Optical cluster finders
     "RM", "WHL",
     "MAXBCG", "GMBCG",
-    "CAMIRA", "CODEX", "NSC", "SPIDERS", "DLSCL",
+    "CAMIRA", "CODEX", "NSC", "SPIDERS", "DLSCL","SDSS-C4", "SHELS",
 
     # X-ray cluster catalogs
-    "MCXC", "RXC", "XMMXCS", "XCLASS",
+    "MCXC", "RXC", "XMMXCS", "XCLASS", "BAX", "RXGCC", "EXSS","XCLASS",
 
     # SZ catalogs
-    "PLCKESZ", "PSZ1", "PSZ2", "PSZRX", "ACT-C",
+    "PLCKESZ", "PSZ1", "PSZ2", "PSZRX", "ACT-CL",
+
+    # Survey object identifiers
+    "SDSS", "NSC", "2MASSCL", "GC2M", "1RXS", "RX", "SRGA", "2E", "2XMM", "2XMMI", "2XMMP", "CXOU", "ERASS1", "ERASS",
 
     }
 
@@ -494,49 +495,81 @@ def build_clean_alias_header(
     """
 
     PREFIX_DESCRIPTIONS: dict[str, str] = {
-        # Classic optical catalogs
+        # Classic Canonical Cluster Identifiers
         "ABELL": "Abell galaxy cluster catalog (Abell 1958; Abell, Corwin & Olowin 1989).",
         "ZWCL": "Zwicky cluster catalog (optical clusters).",
         "MACS": "MAssive Cluster Survey (high-mass, mostly X-ray selected clusters).",
+        "MCS": "Massive Cluster Survey naming variant used in some cross-IDs (often alongside MACS).",
 
-        # Optical richness-based cluster catalogs
+        # -- Cluster Catalogs --
+        # Optical/ Red-sequence/ Photometric Cluster Catalogs
         "RM": "redMaPPer cluster catalog (SDSS-based red-sequence cluster finder).",
         "WHL": "Wen-Han-Liu SDSS cluster catalog.",
         "MAXBCG": "MaxBCG SDSS cluster catalog (BCG-based selection).",
         "GMBCG": "Gaussian Mixture Brightest Cluster Galaxy catalog (SDSS).",
         "CAMIRA": "CAMIRA optical cluster finder (Subaru/HSC).",
-        "CODEX": "CODEX X-ray-optical cluster catalog.",
-        "NSC": "NOAO Source Catalog cluster identifications.",
-        "SPIDERS": "SPIDERS (SDSS-IV) spectroscopic cluster identifications.",
-        "SHELS": "Smithsonian Hectospec Lensing Survey cluster catalog.",
+        "NSCS": "Northern Sky Cluster Survey.",
         "DLSCL": "Deep Lens Survey cluster catalog.",
+        "SDSS-C4": "SDSS C4 cluster catalog (clusters identified in SDSS spectroscopy).",
 
-        # X-ray cluster catalogs
-        "MCXC": "Meta-Catalogue of X-ray detected Clusters (combined X-ray catalogs).",
-        "RXC": "REFLEX ROSAT X-ray cluster catalog.",
+        # Spectroscopic Cluster Catalogs
+        "SPIDERS": "SPIDERS (SDSS-IV) spectroscopic cluster identifications.",
+        "SHELS": "Smithsonian Hectospec Lensing Survey (spec/ weak lensing) cluster catalog.",
+
+        # X-ray Cluster Catalogs
+        "MCXC": "Meta-Catalog of X-ray detected Clusters (combined X-ray catalogs).",
+        "RXC": "REFLEX/NORAS ROSAT X-ray cluster catalog.",
+        "RXGCC": "ROSAT Galaxy Cluster Catalogue (RXGCC).",
         "XMMXCS": "XMM Cluster Survey (X-ray selected clusters).",
-        "XCLASS": "X-ray cluster catalog (XMM-based).",
+        "XCLASS": "XMM-Newton Cluster Archive Super Survey, XMM serendipitous cluster catalog.",
+        "CODEX": "CODEX X-ray-optical cluster catalog.",
         "BAX": "BAX (Base de Données Amas de Galaxies X) X-ray cluster database.",
 
-        # SZ cluster catalogs
+        # SZ Cluster Catalogs
         "PLCKESZ": "Planck Early Sunyaev-Zel'dovich (SZ) cluster catalog.",
         "PSZ1": "Planck SZ cluster catalog, first release.",
         "PSZ2": "Planck SZ cluster catalog, second release.",
         "PSZRX": "Planck SZ-X-ray matched cluster catalog.",
-        "ACT-C": "Atacama Cosmology Telescope cluster catalog (SZ-selected).",
+        "ACT-CL": "Atacama Cosmology Telescope cluster catalog (SZ-selected).",
 
-        # Optional extended entries
+        # -- Survey Object Identifiers --
+        # Optical
+        "SDSS": "Sloan Digital Sky Survey object designation.",
+        "NSC": "NOAO Source Catalog object naming.",
         "2MASSCL": "2MASS Galaxy Cluster catalog.",
         "GC2M": "2MASS-based galaxy cluster catalog.",
-        "EXSS": "Extended X-ray Source Survey (may include clusters).",
+        "EXSS": "Extended X-ray Source Survey (ROSAT).",
 
-        # Object-level cross-ID catalogs (not cluster catalogs per se, but commonly cross-ID'd)
-        "2MASS": "Two Micron All Sky Survey source catalog (object-level).",
-        "WISEA": "WISE All-Sky source catalog (object-level).",
-        "1RXS": "ROSAT All-Sky Survey source catalog (object-level).",
-        "2E": "Einstein Observatory source catalog (object-level).",
-        "SDSS": "Sloan Digital Sky Survey object designation.",
+        # IR
+        "2MASS": "Two Micron All Sky Survey source catalog.",
+        "WISEA": "WISE All-Sky source catalog.",
+
+        # X-ray
+        "1RXS": "ROSAT All-Sky Survey Bright/Faint Source Catalog",
+        "RX": "ROSAT source catalog.",
+        "SRGA": "SRG/eROSITA All-Sky Survey source naming.",
+        "2E": "Einstein Observatory source catalog.",
+        "2XMM": "XMM-Newton 2XMM source catalog naming.",
+        "2XMMI": "2XMMi (incremental) XMM-Newton source catalog naming.",
+        "2XMMP": "2XMMp (pre-release) XMM-Newton source catalog naming.",
+        "CXOU": "Chandra X-ray Observatory source naming.",
+        "ERASS1": "eROSITA All-Sky Survey DR1 source naming.",
+        "ERASS": "eROSITA All-Sky Survey DR1 source naming.",
+
+        # Radio
+        "NVSS": "NRAO VLA Sky Survey (1.4 GHz) radio source designation.",
+        "FIRST": "Faint Images of the Radio Sky at Twenty cm source designation.",
+        "TGSS": "TIFR GMRT Sky Survey radio source designation.",
+        "VLASS": "VLA Sky Survey source designation.",
+        "SUMSS": "Sydney University Molonglo Sky Survey radio source designation.",
+        "WN": "Westerbork Northern Sky Survey (WENSS) radio source designation.",
+
+        # CMB
         "PLANCK": "Generic Planck designation.",
+
+        # Misc General Identifiers
+        "CLG": "Generic “Cluster of Galaxies” designation used in literature-based cross-IDs.",
+        "SCL": "Supercluster catalog designation, typically from large-scale structure studies.",
     }
 
 
