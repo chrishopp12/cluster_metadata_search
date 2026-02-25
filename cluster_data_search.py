@@ -667,7 +667,7 @@ def resolve_bibcodes_ads(
         )
 
     if fields is None:
-        fields = ["bibcode", "title", "author", "pub", "year", "doi", "citation_count"]
+        fields = ["bibcode", "title", "abstract", "author", "pub", "year", "doi", "citation_count"]
 
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -707,12 +707,17 @@ def resolve_bibcodes_ads(
         if isinstance(doi, list):
             doi = doi[0] if doi else None
 
+        abstract = doc.get("abstract")
+        if isinstance(abstract, list):
+           abstract = abstract[0] if abstract else None
+
         out.append(
             {
                 "bibcode": doc.get("bibcode", bc),
                 "year": doc.get("year"),
                 "first_author": first_author,
                 "title": title,
+                "abstract": abstract,
                 "pub": doc.get("pub"),
                 "doi": doi,
                 "citation_count": doc.get("citation_count"),
